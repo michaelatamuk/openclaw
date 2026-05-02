@@ -12,7 +12,9 @@ Plugins extend OpenClaw with new capabilities: channels, model providers,
 agent harnesses, tools, skills, speech, realtime transcription, realtime
 voice, media-understanding, image generation, video generation, web fetch, web
 search, and more. Some plugins are **core** (shipped with OpenClaw), others
-are **external** (published on npm by the community).
+are **external**. Most external plugins are published and discovered through
+[ClawHub](/tools/clawhub). Npm remains supported for direct installs and for a
+temporary set of OpenClaw-owned plugin packages while that migration finishes.
 
 ## Quick start
 
@@ -25,8 +27,17 @@ are **external** (published on npm by the community).
 
   <Step title="Install a plugin">
     ```bash
+    # Search ClawHub plugins
+    openclaw plugins search "calendar"
+
+    # From ClawHub
+    openclaw plugins install clawhub:openclaw-codex-app-server
+
     # From npm
-    openclaw plugins install @openclaw/voice-call
+    openclaw plugins install npm:@acme/openclaw-plugin
+
+    # From git
+    openclaw plugins install git:github.com/acme/openclaw-plugin@v1.0.0
 
     # From a local directory or archive
     openclaw plugins install ./my-plugin
@@ -43,19 +54,33 @@ are **external** (published on npm by the community).
     Then configure under `plugins.entries.\<id\>.config` in your config file.
 
   </Step>
+
+  <Step title="Verify the plugin">
+    ```bash
+    openclaw plugins inspect <plugin-id> --runtime --json
+
+    # If the plugin registered a CLI root, run one command from that root.
+    openclaw <plugin-command> --help
+    ```
+
+    Use `--runtime` when you need to prove registered tools, services, gateway
+    methods, hooks, or plugin-owned CLI commands. Plain `inspect` is a cold
+    manifest/registry check and intentionally avoids importing plugin runtime.
+
+  </Step>
 </Steps>
 
 If you prefer chat-native control, enable `commands.plugins: true` and use:
 
 ```text
-/plugin install clawhub:@openclaw/voice-call
-/plugin show voice-call
-/plugin enable voice-call
+/plugin install clawhub:<package>
+/plugin show <plugin-id>
+/plugin enable <plugin-id>
 ```
 
 The install path uses the same resolver as the CLI: local path/archive, explicit
-`clawhub:<pkg>`, explicit `npm:<pkg>`, or bare package spec (ClawHub first, then
-npm fallback).
+`clawhub:<pkg>`, explicit `npm:<pkg>`, explicit `git:<repo>`, or bare package
+spec (ClawHub first, then npm fallback).
 
 If config is invalid, install normally fails closed and points you at
 `openclaw doctor --fix`. The only recovery exception is a narrow bundled-plugin
@@ -77,20 +102,22 @@ Gateway startup skips plugin discovery/load work and `openclaw doctor` preserves
 the disabled plugin config instead of auto-removing it. Re-enable plugins before
 running doctor cleanup if you want stale plugin ids removed.
 
-Packaged OpenClaw installs do not eagerly install every bundled plugin's
-runtime dependency tree. When a bundled OpenClaw-owned plugin is active from
-plugin config, legacy channel config, or a default-enabled manifest, startup
-repairs only that plugin's declared runtime dependencies before importing it.
-Persisted channel auth state alone does not activate a bundled channel for
-Gateway startup runtime-dependency repair.
-Explicit disablement still wins: `plugins.entries.<id>.enabled: false`,
-`plugins.deny`, `plugins.enabled: false`, and `channels.<id>.enabled: false`
-prevent automatic bundled runtime-dependency repair for that plugin/channel.
-A non-empty `plugins.allow` also bounds default-enabled bundled runtime-dependency
-repair; explicit bundled channel enablement (`channels.<id>.enabled: true`) can
-still repair that channel's plugin dependencies.
-External plugins and custom load paths must still be installed through
-`openclaw plugins install`.
+Plugin dependency installation happens only during explicit install/update or
+doctor repair flows. Gateway startup, config reload, and runtime inspection do
+not run package managers or repair dependency trees. Local plugins must already
+have their dependencies installed, while npm, git, and ClawHub plugins are
+installed under OpenClaw's managed plugin roots. npm dependencies may be hoisted
+within OpenClaw's managed npm root; install/update scans that managed root before
+trust and uninstall removes npm-managed packages through npm. External plugins
+and custom load paths must still be installed through `openclaw plugins install`.
+See [Plugin dependency resolution](/plugins/dependency-resolution) for the
+install-time lifecycle.
+
+Source checkouts are pnpm workspaces. If you clone OpenClaw to hack on bundled
+plugins, run `pnpm install`; OpenClaw then loads bundled plugins from
+`extensions/<id>` so edits and package-local dependencies are used directly.
+Plain npm root installs are for packaged OpenClaw, not source checkout
+development.
 
 ## Plugin types
 
@@ -116,7 +143,9 @@ peer such as `src/index.ts` to `dist/index.js`.
 Use `openclaw.runtimeExtensions` when published runtime files do not live at the
 same paths as the source entries. When present, `runtimeExtensions` must contain
 exactly one entry for every `extensions` entry. Mismatched lists fail install and
-plugin discovery rather than silently falling back to source paths.
+plugin discovery rather than silently falling back to source paths. If you also
+publish `openclaw.setupEntry`, use `openclaw.runtimeSetupEntry` for its built
+JavaScript peer; that file is required when declared.
 
 ```json
 {
@@ -130,16 +159,33 @@ plugin discovery rather than silently falling back to source paths.
 
 ## Official plugins
 
-### Installable (npm)
+### OpenClaw-owned npm packages during migration
 
-| Plugin          | Package                | Docs                                 |
-| --------------- | ---------------------- | ------------------------------------ |
-| Matrix          | `@openclaw/matrix`     | [Matrix](/channels/matrix)           |
-| Microsoft Teams | `@openclaw/msteams`    | [Microsoft Teams](/channels/msteams) |
-| Nostr           | `@openclaw/nostr`      | [Nostr](/channels/nostr)             |
-| Voice Call      | `@openclaw/voice-call` | [Voice Call](/plugins/voice-call)    |
-| Zalo            | `@openclaw/zalo`       | [Zalo](/channels/zalo)               |
-| Zalo Personal   | `@openclaw/zalouser`   | [Zalo Personal](/plugins/zalouser)   |
+ClawHub is the primary distribution path for most plugins. Current packaged
+OpenClaw releases already bundle many official plugins, so those do not need
+separate npm installs in normal setups. Until every OpenClaw-owned plugin has
+migrated to ClawHub, OpenClaw still ships some `@openclaw/*` plugin packages on
+npm for older/custom installs and direct npm workflows.
+
+If npm reports an `@openclaw/*` plugin package as deprecated, that package
+version is from an older external package train. Use the bundled plugin from
+current OpenClaw or a local checkout until a newer npm package is published.
+
+| Plugin          | Package                    | Docs                                       |
+| --------------- | -------------------------- | ------------------------------------------ |
+| BlueBubbles     | `@openclaw/bluebubbles`    | [BlueBubbles](/channels/bluebubbles)       |
+| Discord         | `@openclaw/discord`        | [Discord](/channels/discord)               |
+| Feishu          | `@openclaw/feishu`         | [Feishu](/channels/feishu)                 |
+| Matrix          | `@openclaw/matrix`         | [Matrix](/channels/matrix)                 |
+| Mattermost      | `@openclaw/mattermost`     | [Mattermost](/channels/mattermost)         |
+| Microsoft Teams | `@openclaw/msteams`        | [Microsoft Teams](/channels/msteams)       |
+| Nextcloud Talk  | `@openclaw/nextcloud-talk` | [Nextcloud Talk](/channels/nextcloud-talk) |
+| Nostr           | `@openclaw/nostr`          | [Nostr](/channels/nostr)                   |
+| Synology Chat   | `@openclaw/synology-chat`  | [Synology Chat](/channels/synology-chat)   |
+| Tlon            | `@openclaw/tlon`           | [Tlon](/channels/tlon)                     |
+| WhatsApp        | `@openclaw/whatsapp`       | [WhatsApp](/channels/whatsapp)             |
+| Zalo            | `@openclaw/zalo`           | [Zalo](/channels/zalo)                     |
+| Zalo Personal   | `@openclaw/zalouser`       | [Zalo Personal](/plugins/zalouser)         |
 
 ### Core (shipped with OpenClaw)
 
@@ -154,7 +200,7 @@ plugin discovery rather than silently falling back to source paths.
 
   <Accordion title="Memory plugins">
     - `memory-core` — bundled memory search (default via `plugins.slots.memory`)
-    - `memory-lancedb` — install-on-demand long-term memory with auto-recall/capture (set `plugins.slots.memory = "memory-lancedb"`)
+    - `memory-lancedb` — LanceDB-backed long-term memory with auto-recall/capture (set `plugins.slots.memory = "memory-lancedb"`)
 
     See [Memory LanceDB](/plugins/memory-lancedb) for OpenAI-compatible
     embedding setup, Ollama examples, recall limits, and troubleshooting.
@@ -198,6 +244,12 @@ Looking for third-party plugins? See [Community Plugins](/plugins/community).
 | `load.paths`     | Extra plugin files/directories                            |
 | `slots`          | Exclusive slot selectors (e.g. `memory`, `contextEngine`) |
 | `entries.\<id\>` | Per-plugin toggles + config                               |
+
+`plugins.allow` is exclusive. When it is non-empty, only listed plugins can load
+or expose tools, even if `tools.allow` contains `"*"` or a specific plugin-owned
+tool name. If a tool allowlist references plugin tools, add the owning plugin ids
+to `plugins.allow` or remove `plugins.allow`; `openclaw doctor` warns about this
+shape.
 
 Config changes **require a gateway restart**. If the Gateway is running with config
 watch + in-process restart enabled (the default `openclaw gateway` path), that
@@ -284,7 +336,7 @@ do not run in live chat traffic, check these first:
 - Restart the live Gateway after plugin install/config/code changes. In wrapper
   containers, PID 1 may only be a supervisor; restart or signal the child
   `openclaw gateway run` process.
-- Use `openclaw plugins inspect <id> --json` to confirm hook registrations and
+- Use `openclaw plugins inspect <id> --runtime --json` to confirm hook registrations and
   diagnostics. Non-bundled conversation hooks such as `llm_input`,
   `llm_output`, `before_agent_finalize`, and `agent_end` need
   `plugins.entries.<id>.hooks.allowConversationAccess=true`.
@@ -294,6 +346,43 @@ do not run in live chat traffic, check these first:
 - For proof of the effective session model, use `openclaw sessions` or the
   Gateway session/status surfaces and, when debugging provider payloads, start
   the Gateway with `--raw-stream --raw-stream-path <path>`.
+
+### Slow plugin tool setup
+
+If agent turns appear to stall while preparing tools, enable trace logging and
+check for plugin tool factory timing lines:
+
+```bash
+openclaw config set logging.level trace
+openclaw logs --follow
+```
+
+Look for:
+
+```text
+[trace:plugin-tools] factory timings ...
+```
+
+The summary lists total factory time and the slowest plugin tool factories,
+including plugin id, declared tool names, result shape, and whether the tool is
+optional. Slow lines are promoted to warnings when a single factory takes at
+least 1s or total plugin tool factory prep takes at least 5s.
+
+OpenClaw caches successful plugin tool factory results for repeated resolutions
+with the same effective request context. The cache key includes the effective
+runtime config, workspace, agent/session ids, sandbox policy, browser settings,
+delivery context, requester identity, and ownership state, so factories that
+depend on those trusted fields are re-run when the context changes.
+
+If one plugin dominates the timing, inspect its runtime registrations:
+
+```bash
+openclaw plugins inspect <plugin-id> --runtime --json
+```
+
+Then update, reinstall, or disable that plugin. Plugin authors should move
+expensive dependency loading behind the tool execution path instead of doing it
+inside the tool factory.
 
 ### Duplicate channel or tool ownership
 
@@ -311,7 +400,7 @@ Debug steps:
 
 - Run `openclaw plugins list --enabled --verbose` to see every enabled plugin
   and origin.
-- Run `openclaw plugins inspect <id> --json` for each suspected plugin and
+- Run `openclaw plugins inspect <id> --runtime --json` for each suspected plugin and
   compare `channels`, `channelConfigs`, `tools`, and diagnostics.
 - Run `openclaw plugins registry --refresh` after installing or removing
   plugin packages so persisted metadata reflects the current install.
@@ -356,7 +445,9 @@ openclaw plugins list                       # compact inventory
 openclaw plugins list --enabled            # only enabled plugins
 openclaw plugins list --verbose            # per-plugin detail lines
 openclaw plugins list --json               # machine-readable inventory
-openclaw plugins inspect <id>              # deep detail
+openclaw plugins search <query>            # search ClawHub plugin catalog
+openclaw plugins inspect <id>              # static detail
+openclaw plugins inspect <id> --runtime    # registered hooks/tools/CLI/gateway methods
 openclaw plugins inspect <id> --json       # machine-readable
 openclaw plugins inspect --all             # fleet-wide table
 openclaw plugins info <id>                 # inspect alias
@@ -368,6 +459,8 @@ openclaw doctor --fix                      # repair plugin registry state
 openclaw plugins install <package>         # install (ClawHub first, then npm)
 openclaw plugins install clawhub:<pkg>     # install from ClawHub only
 openclaw plugins install npm:<pkg>         # install from npm only
+openclaw plugins install git:<repo>        # install from git
+openclaw plugins install git:<repo>@<ref>  # install from git ref
 openclaw plugins install <spec> --force    # overwrite existing install
 openclaw plugins install <path>            # install from local path
 openclaw plugins install -l <path>         # link (no copy) for dev
@@ -382,6 +475,12 @@ openclaw plugins uninstall <id>          # remove config and plugin index record
 openclaw plugins uninstall <id> --keep-files
 openclaw plugins marketplace list <source>
 openclaw plugins marketplace list <source> --json
+
+# Verify runtime registrations after install.
+openclaw plugins inspect <id> --runtime --json
+
+# Run plugin-owned CLI commands directly from the OpenClaw root CLI.
+openclaw <plugin-command> --help
 
 openclaw plugins enable <id>
 openclaw plugins disable <id>
@@ -433,6 +532,12 @@ This CLI flag applies to plugin install/update flows only. Gateway-backed skill
 dependency installs use the matching `dangerouslyForceUnsafeInstall` request
 override instead, while `openclaw skills install` remains the separate ClawHub
 skill download/install flow.
+
+If a plugin you published on ClawHub is hidden or blocked by a scan, open the
+ClawHub dashboard or run `clawhub package rescan <name>` to ask ClawHub to check
+it again. `--dangerously-force-unsafe-install` only affects installs on your own
+machine; it does not ask ClawHub to rescan the plugin or make a blocked release
+public.
 
 Compatible bundles participate in the same plugin list/inspect/enable/disable
 flow. Current runtime support includes bundle skills, Claude command-skills,

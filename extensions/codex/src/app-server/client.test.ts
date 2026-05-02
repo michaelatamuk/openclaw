@@ -61,11 +61,38 @@ describe("CodexAppServerClient", () => {
       expect(warn).toHaveBeenCalledWith(
         "failed to parse codex app-server message",
         expect.objectContaining({
+          consoleMessage: expect.stringContaining("<redacted>"),
           linePreview: '{"token":"<redacted>"} trailing',
         }),
       ),
     );
     expect(JSON.stringify(warn.mock.calls)).not.toContain("secret-value");
+  });
+
+  it("recovers app-server messages split by raw newlines inside JSON strings", async () => {
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+    const harness = createClientHarness();
+    clients.push(harness.client);
+    const notifications: unknown[] = [];
+    harness.client.addNotificationHandler((notification) => {
+      notifications.push(notification);
+    });
+
+    harness.process.stdout.write(
+      '{"method":"item/commandExecution/outputDelta","params":{"delta":"first' +
+        "\n" +
+        'second"}}\n',
+    );
+
+    await vi.waitFor(() =>
+      expect(notifications).toEqual([
+        {
+          method: "item/commandExecution/outputDelta",
+          params: { delta: "first\nsecond" },
+        },
+      ]),
+    );
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("preserves JSON-RPC error codes", async () => {
@@ -325,6 +352,44 @@ describe("CodexAppServerClient", () => {
       id: "srv-1",
       result: { contentItems: [{ type: "inputText", text: "ok" }], success: true },
     });
+  });
+
+  it("fails closed when a dynamic tool server request handler hangs", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+    const harness = createClientHarness();
+    clients.push(harness.client);
+    harness.client.addRequestHandler((request) => {
+      if (request.method === "item/tool/call") {
+        return new Promise<never>(() => undefined);
+      }
+      return undefined;
+    });
+
+    harness.send({ id: "srv-timeout", method: "item/tool/call", params: { tool: "message" } });
+    await vi.advanceTimersByTimeAsync(__testing.CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS);
+    await vi.waitFor(() => expect(harness.writes.length).toBe(1));
+
+    expect(JSON.parse(harness.writes[0] ?? "{}")).toEqual({
+      id: "srv-timeout",
+      result: {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: `OpenClaw dynamic tool call timed out after ${__testing.CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS}ms before sending a response to Codex.`,
+          },
+        ],
+      },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "codex app-server server request timed out",
+      expect.objectContaining({
+        id: "srv-timeout",
+        method: "item/tool/call",
+        timeoutMs: __testing.CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS,
+      }),
+    );
   });
 
   it("fails closed for unhandled native app-server approvals", async () => {

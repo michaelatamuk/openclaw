@@ -1,10 +1,8 @@
 import { EventEmitter } from "node:events";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { DISCORD_GATEWAY_TRANSPORT_ACTIVITY_EVENT } from "./gateway-handle.js";
 
-const { baseConnectSpy, GatewayIntents, GatewayPlugin } = vi.hoisted(() => {
-  const baseConnectSpy = vi.fn<(resume: boolean) => void>();
-
+const { GatewayIntents, GatewayPlugin } = vi.hoisted(() => {
   const GatewayIntents = {
     Guilds: 1 << 0,
     GuildMessages: 1 << 1,
@@ -37,9 +35,9 @@ const { baseConnectSpy, GatewayIntents, GatewayPlugin } = vi.hoisted(() => {
     options: unknown;
     gatewayInfo: unknown;
     emitter = new TestEmitter();
-    heartbeatInterval: ReturnType<typeof setInterval> | undefined = undefined;
-    firstHeartbeatTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
     isConnecting: boolean = false;
+    heartbeatInterval?: NodeJS.Timeout;
+    firstHeartbeatTimeout?: NodeJS.Timeout;
     ws?: unknown;
 
     constructor(options?: unknown) {
@@ -48,17 +46,17 @@ const { baseConnectSpy, GatewayIntents, GatewayPlugin } = vi.hoisted(() => {
 
     async registerClient(_client: unknown): Promise<void> {}
 
-    connect(resume = false): void {
-      baseConnectSpy(resume);
+    connect(_resume = false): void {
+      if (this.isConnecting) {
+        return;
+      }
     }
   }
 
-  return { baseConnectSpy, GatewayIntents, GatewayPlugin };
+  return { GatewayIntents, GatewayPlugin };
 });
 
-vi.mock("@buape/carbon/gateway", () => ({ GatewayIntents, GatewayPlugin }));
-
-vi.mock("@buape/carbon/dist/src/plugins/gateway/index.js", () => ({
+vi.mock("../internal/gateway.js", () => ({
   GatewayIntents,
   GatewayPlugin,
 }));
@@ -74,27 +72,44 @@ vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
   danger: (value: string) => value,
 }));
 
-describe("SafeGatewayPlugin.connect()", () => {
+describe("createDiscordGatewayPlugin", () => {
   let createDiscordGatewayPlugin: typeof import("./gateway-plugin.js").createDiscordGatewayPlugin;
+  let parseDiscordGatewayInfoBody: typeof import("./gateway-plugin.js").parseDiscordGatewayInfoBody;
   let resolveDiscordGatewayIntents: typeof import("./gateway-plugin.js").resolveDiscordGatewayIntents;
   let resolveDiscordGatewayInfoTimeoutMs: typeof import("./gateway-plugin.js").resolveDiscordGatewayInfoTimeoutMs;
 
   beforeAll(async () => {
     ({
       createDiscordGatewayPlugin,
+      parseDiscordGatewayInfoBody,
       resolveDiscordGatewayIntents,
       resolveDiscordGatewayInfoTimeoutMs,
     } = await import("./gateway-plugin.js"));
   });
 
-  beforeEach(() => {
-    baseConnectSpy.mockClear();
+  function createPlugin(
+    testing?: NonNullable<Parameters<typeof createDiscordGatewayPlugin>[0]["__testing"]>,
+    discordConfig: Parameters<typeof createDiscordGatewayPlugin>[0]["discordConfig"] = {},
+  ) {
+    return createDiscordGatewayPlugin({
+      discordConfig,
+      runtime: {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+      ...(testing ? { __testing: testing } : {}),
+    });
+  }
+
+  it("omits GuildVoiceStates by default for text-only Discord configs", () => {
+    expect(resolveDiscordGatewayIntents() & GatewayIntents.GuildVoiceStates).toBe(0);
   });
 
-  it("includes GuildVoiceStates when voice is enabled by default", () => {
-    expect(resolveDiscordGatewayIntents() & GatewayIntents.GuildVoiceStates).toBe(
-      GatewayIntents.GuildVoiceStates,
-    );
+  it("includes GuildVoiceStates when voice is enabled", () => {
+    const intents = resolveDiscordGatewayIntents({ voiceEnabled: true });
+
+    expect(intents & GatewayIntents.GuildVoiceStates).toBe(GatewayIntents.GuildVoiceStates);
   });
 
   it("omits GuildVoiceStates when voice is disabled", () => {
@@ -117,8 +132,10 @@ describe("SafeGatewayPlugin.connect()", () => {
     expect(disabled & GatewayIntents.GuildVoiceStates).toBe(0);
   });
 
-  it("keeps the legacy intents-config argument shape working", () => {
-    const intents = resolveDiscordGatewayIntents({ presence: true, guildMembers: true });
+  it("includes optional configured privileged intents", () => {
+    const intents = resolveDiscordGatewayIntents({
+      intentsConfig: { presence: true, guildMembers: true },
+    });
 
     expect(intents & GatewayIntents.GuildPresences).toBe(GatewayIntents.GuildPresences);
     expect(intents & GatewayIntents.GuildMembers).toBe(GatewayIntents.GuildMembers);
@@ -134,40 +151,73 @@ describe("SafeGatewayPlugin.connect()", () => {
     expect(resolveDiscordGatewayInfoTimeoutMs({ env: {} })).toBe(30_000);
   });
 
-  function createPlugin(
-    testing?: NonNullable<Parameters<typeof createDiscordGatewayPlugin>[0]["__testing"]>,
-  ) {
-    return createDiscordGatewayPlugin({
-      discordConfig: {},
-      runtime: {
-        log: vi.fn(),
-        error: vi.fn(),
-        exit: vi.fn(),
+  it("parses valid Discord gateway metadata", () => {
+    expect(
+      parseDiscordGatewayInfoBody(
+        JSON.stringify({
+          url: "wss://gateway.discord.gg",
+          shards: 1,
+          session_start_limit: {
+            total: 1000,
+            remaining: 999,
+            reset_after: 0,
+            max_concurrency: 1,
+          },
+        }),
+      ),
+    ).toEqual({
+      url: "wss://gateway.discord.gg",
+      shards: 1,
+      session_start_limit: {
+        total: 1000,
+        remaining: 999,
+        reset_after: 0,
+        max_concurrency: 1,
       },
-      ...(testing ? { __testing: testing } : {}),
     });
-  }
-
-  it("clears stale heartbeatInterval before delegating to super when isConnecting=true", () => {
-    const plugin = createPlugin();
-
-    const staleInterval = setInterval(() => {}, 99_999);
-    try {
-      plugin.heartbeatInterval = staleInterval;
-
-      // isConnecting is private on GatewayPlugin — cast required.
-      (plugin as unknown as { isConnecting: boolean }).isConnecting = true;
-
-      plugin.connect(false);
-
-      expect(plugin.heartbeatInterval).toBeUndefined();
-      expect(baseConnectSpy).toHaveBeenCalledWith(false);
-    } finally {
-      clearInterval(staleInterval);
-    }
   });
 
-  it("leaves Carbon autoInteractions disabled so OpenClaw owns interaction handoff", () => {
+  it("rejects malformed Discord gateway metadata", () => {
+    expect(() =>
+      parseDiscordGatewayInfoBody(
+        JSON.stringify({
+          url: "",
+          shards: 0,
+          session_start_limit: {
+            total: 1000,
+            remaining: 999,
+            reset_after: 0,
+            max_concurrency: 1,
+          },
+        }),
+      ),
+    ).toThrow(/url|shards/);
+  });
+
+  it("omits voice states when Discord voice is disabled in account config", () => {
+    const plugin = createPlugin(undefined, { voice: { enabled: false } });
+    const options = (plugin as unknown as { options?: { intents?: number } }).options;
+
+    expect((options?.intents ?? 0) & GatewayIntents.GuildVoiceStates).toBe(0);
+  });
+
+  it("omits voice states when Discord voice config is absent", () => {
+    const plugin = createPlugin(undefined, {});
+    const options = (plugin as unknown as { options?: { intents?: number } }).options;
+
+    expect((options?.intents ?? 0) & GatewayIntents.GuildVoiceStates).toBe(0);
+  });
+
+  it("keeps voice states for existing Discord voice config blocks", () => {
+    const plugin = createPlugin(undefined, { voice: {} });
+    const options = (plugin as unknown as { options?: { intents?: number } }).options;
+
+    expect((options?.intents ?? 0) & GatewayIntents.GuildVoiceStates).toBe(
+      GatewayIntents.GuildVoiceStates,
+    );
+  });
+
+  it("leaves autoInteractions disabled so OpenClaw owns interaction handoff", () => {
     const plugin = createPlugin();
 
     expect((plugin as unknown as { options?: { autoInteractions?: boolean } }).options).toEqual(
@@ -175,7 +225,7 @@ describe("SafeGatewayPlugin.connect()", () => {
     );
   });
 
-  it("keeps OpenClaw metadata timeout out of Carbon gateway options", () => {
+  it("keeps OpenClaw metadata timeout out of gateway options", () => {
     const plugin = createDiscordGatewayPlugin({
       discordConfig: { gatewayInfoTimeoutMs: 5_000 },
       runtime: {
@@ -189,25 +239,6 @@ describe("SafeGatewayPlugin.connect()", () => {
       (plugin as unknown as { options?: { gatewayInfoTimeoutMs?: number } }).options
         ?.gatewayInfoTimeoutMs,
     ).toBeUndefined();
-  });
-
-  it("clears stale firstHeartbeatTimeout before delegating to super when isConnecting=true", () => {
-    const plugin = createPlugin();
-
-    const staleTimeout = setTimeout(() => {}, 99_999);
-    try {
-      plugin.firstHeartbeatTimeout = staleTimeout;
-
-      // isConnecting is private on GatewayPlugin — cast required.
-      (plugin as unknown as { isConnecting: boolean }).isConnecting = true;
-
-      plugin.connect(false);
-
-      expect(plugin.firstHeartbeatTimeout).toBeUndefined();
-      expect(baseConnectSpy).toHaveBeenCalledWith(false);
-    } finally {
-      clearTimeout(staleTimeout);
-    }
   });
 
   it("emits transport activity for current gateway socket messages", () => {

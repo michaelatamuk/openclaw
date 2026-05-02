@@ -5,6 +5,7 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { clearCliSession, setCliSessionBinding, setCliSessionId } from "../cli-session.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
@@ -13,17 +14,15 @@ import { deriveSessionTotalTokens, hasNonzeroUsage } from "../usage.js";
 
 type RunResult = Awaited<ReturnType<(typeof import("../pi-embedded.js"))["runEmbeddedPiAgent"]>>;
 
-let usageFormatModulePromise: Promise<typeof import("../../utils/usage-format.js")> | undefined;
-let contextModulePromise: Promise<typeof import("../context.js")> | undefined;
+const usageFormatModuleLoader = createLazyImportLoader(() => import("../../utils/usage-format.js"));
+const contextModuleLoader = createLazyImportLoader(() => import("../context.js"));
 
 async function getUsageFormatModule() {
-  usageFormatModulePromise ??= import("../../utils/usage-format.js");
-  return await usageFormatModulePromise;
+  return await usageFormatModuleLoader.load();
 }
 
 async function getContextModule() {
-  contextModulePromise ??= import("../context.js");
-  return await contextModulePromise;
+  return await contextModuleLoader.load();
 }
 
 function resolveNonNegativeNumber(value: number | undefined): number | undefined {
@@ -133,8 +132,9 @@ export async function updateSessionStoreAfterAgentRun(params: {
     const { estimateUsageCost, resolveModelCostConfig } = await getUsageFormatModule();
     const input = usage.input ?? 0;
     const output = usage.output ?? 0;
+    const usageForContext = isCliProvider(providerUsed, cfg) ? undefined : usage;
     const totalTokens = deriveSessionTotalTokens({
-      usage: promptTokens ? undefined : usage,
+      usage: promptTokens ? undefined : usageForContext,
       contextTokens,
       promptTokens,
     });

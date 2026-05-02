@@ -52,6 +52,67 @@ describe("$schema key in config (#14998)", () => {
   });
 });
 
+describe("accessGroups config", () => {
+  it("accepts Discord channel audience access groups", () => {
+    const result = OpenClawSchema.safeParse({
+      accessGroups: {
+        maintainers: {
+          type: "discord.channelAudience",
+          guildId: "1456350064065904867",
+          channelId: "1456744319972282449",
+          membership: "canViewChannel",
+        },
+      },
+      channels: {
+        discord: {
+          dmPolicy: "allowlist",
+          allowFrom: ["accessGroup:maintainers"],
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects unknown access group membership modes", () => {
+    const result = OpenClawSchema.safeParse({
+      accessGroups: {
+        maintainers: {
+          type: "discord.channelAudience",
+          guildId: "guild",
+          channelId: "channel",
+          membership: "roleMember",
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts message sender access groups for any channel", () => {
+    const result = OpenClawSchema.safeParse({
+      accessGroups: {
+        owners: {
+          type: "message.senders",
+          members: {
+            "*": ["global-owner"],
+            telegram: ["12345"],
+            discord: ["discord:67890"],
+          },
+        },
+      },
+      channels: {
+        telegram: {
+          dmPolicy: "allowlist",
+          allowFrom: ["accessGroup:owners"],
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+
 describe("plugins.slots.contextEngine", () => {
   it("accepts a contextEngine slot id", () => {
     const result = OpenClawSchema.safeParse({
@@ -409,6 +470,27 @@ describe("gateway.tools config", () => {
 });
 
 describe("gateway.channelHealthCheckMinutes", () => {
+  it("accepts preauth handshake timeout tuning", () => {
+    const res = validateConfigObject({
+      gateway: {
+        handshakeTimeoutMs: 30_000,
+      },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects non-positive preauth handshake timeouts", () => {
+    const res = validateConfigObject({
+      gateway: {
+        handshakeTimeoutMs: 0,
+      },
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues[0]?.path).toBe("gateway.handshakeTimeoutMs");
+    }
+  });
+
   it("accepts zero to disable monitor", () => {
     const res = validateConfigObject({
       gateway: {

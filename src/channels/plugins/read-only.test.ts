@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupPluginLoaderFixturesForTest,
@@ -8,7 +9,18 @@ import {
   resetPluginLoaderTestStateForTest,
   useNoBundledPlugins,
 } from "../../plugins/loader.test-fixtures.js";
-import { listReadOnlyChannelPluginsForConfig } from "./read-only.js";
+import {
+  listPluginLoaderModuleCandidateUrls,
+  listReadOnlyChannelPluginsForConfig,
+} from "./read-only.js";
+
+const moduleLoaderParams = vi.hoisted(
+  () =>
+    [] as Array<{
+      modulePath: string;
+      tryNative?: boolean;
+    }>,
+);
 
 vi.mock("../../plugins/bundled-dir.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../plugins/bundled-dir.js")>();
@@ -16,6 +28,100 @@ vi.mock("../../plugins/bundled-dir.js", async (importOriginal) => {
     ...actual,
     resolveBundledPluginsDir: (env: NodeJS.ProcessEnv = process.env) =>
       env.OPENCLAW_BUNDLED_PLUGINS_DIR ?? actual.resolveBundledPluginsDir(env),
+  };
+});
+
+vi.mock("../../plugins/plugin-module-loader-cache.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../plugins/plugin-module-loader-cache.js")>();
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+
+  type LoaderConfig = {
+    plugins?: {
+      load?: { paths?: unknown };
+    };
+  };
+  type LoaderParams = {
+    config?: LoaderConfig;
+    onlyPluginIds?: readonly string[];
+    workspaceDir?: string;
+  };
+
+  function readJson(filePath: string): unknown {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  }
+
+  function listCandidatePluginDirs(params: LoaderParams): string[] {
+    const paths = params.config?.plugins?.load?.paths;
+    const explicitPaths = Array.isArray(paths)
+      ? paths.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const workspaceExtensionsDir = params.workspaceDir
+      ? path.join(params.workspaceDir, ".openclaw", "extensions")
+      : undefined;
+    if (!workspaceExtensionsDir || !fs.existsSync(workspaceExtensionsDir)) {
+      return explicitPaths;
+    }
+    return explicitPaths.concat(
+      fs
+        .readdirSync(workspaceExtensionsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(workspaceExtensionsDir, entry.name)),
+    );
+  }
+
+  function loadOpenClawPlugins(params: LoaderParams) {
+    const onlyPluginIds = new Set(params.onlyPluginIds ?? []);
+    const channelSetups = listCandidatePluginDirs(params).flatMap((pluginDir) => {
+      const manifestPath = path.join(pluginDir, "openclaw.plugin.json");
+      const packagePath = path.join(pluginDir, "package.json");
+      if (!fs.existsSync(manifestPath) || !fs.existsSync(packagePath)) {
+        return [];
+      }
+      const manifest = readJson(manifestPath);
+      if (!isRecord(manifest) || typeof manifest.id !== "string") {
+        return [];
+      }
+      if (onlyPluginIds.size > 0 && !onlyPluginIds.has(manifest.id)) {
+        return [];
+      }
+      const packageJson = readJson(packagePath);
+      const openclaw = isRecord(packageJson) ? packageJson.openclaw : undefined;
+      const setupEntry = isRecord(openclaw) ? openclaw.setupEntry : undefined;
+      if (typeof setupEntry !== "string") {
+        return [];
+      }
+      const setupModule = require(path.join(pluginDir, setupEntry));
+      const entry = setupModule.default ?? setupModule;
+      const plugin = entry.plugin;
+      return plugin ? [{ pluginId: manifest.id, plugin }] : [];
+    });
+    return { channelSetups };
+  }
+
+  return {
+    ...actual,
+    getCachedPluginModuleLoader: ((params) => {
+      moduleLoaderParams.push({
+        modulePath: params.modulePath,
+        tryNative: params.tryNative,
+      });
+      const actualLoader = actual.getCachedPluginModuleLoader(params);
+      return ((modulePath: string) => {
+        if (
+          modulePath.endsWith("/plugins/loader.js") ||
+          modulePath.endsWith("/plugins/loader.ts")
+        ) {
+          return { loadOpenClawPlugins };
+        }
+        return actualLoader(modulePath);
+      }) as ReturnType<typeof actual.getCachedPluginModuleLoader>;
+    }) satisfies typeof actual.getCachedPluginModuleLoader,
   };
 });
 
@@ -326,6 +432,7 @@ function expectExternalChatSetupOnlyPluginLoaded(params: {
 }
 
 afterEach(() => {
+  moduleLoaderParams.length = 0;
   resetPluginLoaderTestStateForTest();
 });
 
@@ -334,6 +441,20 @@ afterAll(() => {
 });
 
 describe("listReadOnlyChannelPluginsForConfig", () => {
+  it("keeps built plugin loader candidates inside the installed package dist root", () => {
+    const packageRoot = path.join(makeTempDir(), "node_modules", "openclaw");
+    const importerPath = path.join(packageRoot, "dist", "read-only-B4EkEtUx.js");
+    const candidates = listPluginLoaderModuleCandidateUrls(pathToFileURL(importerPath).href).map(
+      (candidate) => fileURLToPath(candidate),
+    );
+
+    expect(candidates).toEqual([
+      path.join(packageRoot, "dist", "plugins", "loader.js"),
+      path.join(packageRoot, "dist", "plugins", "build-smoke-entry.js"),
+    ]);
+    expect(candidates).not.toContain(path.join(packageRoot, "..", "plugins", "loader.js"));
+  });
+
   it("does not load setup-only channel plugin runtime by default", () => {
     const { pluginDir, fullMarker, setupMarker } = writeExternalSetupChannelPlugin();
     const plugins = listReadOnlyChannelPluginsForConfig(
@@ -372,11 +493,19 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
     expectExternalChatSetupOnlyPluginLoaded({ plugins, setupMarker, fullMarker });
+    expect(
+      moduleLoaderParams.some(
+        (entry) =>
+          entry.tryNative === true &&
+          (entry.modulePath.endsWith("/plugins/loader.js") ||
+            entry.modulePath.endsWith("/plugins/loader.ts")),
+      ),
+    ).toBe(true);
   });
 
   it("matches setup-only plugins by manifest-owned channel ids when plugin id differs", () => {
@@ -398,7 +527,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -430,7 +559,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -477,7 +606,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -517,7 +646,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -547,7 +676,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -725,7 +854,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -750,7 +879,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env, EXTERNAL_CHAT_TOKEN: "configured" },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -794,7 +923,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env, [envVar]: "configured" },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -820,7 +949,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env, [envVar]: "configured" },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -868,7 +997,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env, [envVar]: "configured" },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -898,7 +1027,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
           EXTERNAL_CHAT_TOKEN: "configured",
           workspaceDir: "workspace-env-value",
         },
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -934,7 +1063,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       {
         env: { ...process.env },
         includePersistedAuthState: false,
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 
@@ -963,7 +1092,7 @@ describe("listReadOnlyChannelPluginsForConfig", () => {
       } as never,
       {
         env: { ...process.env },
-        includeSetupRuntimeFallback: true,
+        includeSetupFallbackPlugins: true,
       },
     );
 

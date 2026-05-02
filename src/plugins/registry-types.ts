@@ -68,6 +68,7 @@ export type PluginToolRegistration = {
   pluginName?: string;
   factory: OpenClawPluginToolFactory;
   names: string[];
+  declaredNames?: string[];
   optional: boolean;
   source: string;
   rootDir?: string;
@@ -226,6 +227,15 @@ export type PluginNodeHostCommandRegistration = {
   pluginId: string;
   pluginName?: string;
   command: import("./types.js").OpenClawPluginNodeHostCommand;
+  source: string;
+  rootDir?: string;
+};
+
+export type PluginNodeInvokePolicyRegistration = {
+  pluginId: string;
+  pluginName?: string;
+  policy: import("./types.js").OpenClawPluginNodeInvokePolicy;
+  pluginConfig?: Record<string, unknown>;
   source: string;
   rootDir?: string;
 };
@@ -394,11 +404,13 @@ export type PluginRegistry = {
   memoryEmbeddingProviders: PluginMemoryEmbeddingProviderRegistration[];
   agentHarnesses: PluginAgentHarnessRegistration[];
   gatewayHandlers: GatewayRequestHandlers;
+  coreGatewayMethodNames?: string[];
   gatewayMethodScopes?: Partial<Record<string, OperatorScope>>;
   httpRoutes: PluginHttpRouteRegistration[];
   cliRegistrars: PluginCliRegistration[];
   reloads?: PluginReloadRegistration[];
   nodeHostCommands?: PluginNodeHostCommandRegistration[];
+  nodeInvokePolicies?: PluginNodeInvokePolicyRegistration[];
   securityAuditCollectors?: PluginSecurityAuditCollectorRegistration[];
   services: PluginServiceRegistration[];
   gatewayDiscoveryServices: PluginGatewayDiscoveryServiceRegistration[];

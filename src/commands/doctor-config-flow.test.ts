@@ -1385,6 +1385,30 @@ describe("doctor config flow", () => {
     expect(doctorWarnings.some((line) => line.includes("mutable allowlist"))).toBe(false);
   });
 
+  it("warns when hooks transformsDir points outside the hook transforms root", async () => {
+    const doctorWarnings = await collectDoctorWarnings({
+      hooks: {
+        enabled: true,
+        token: "hook-secret",
+        transformsDir: "/virtual/.openclaw/workspace/skills/linear-webhook",
+        mappings: [
+          {
+            match: { path: "linear" },
+            action: "agent",
+            messageTemplate: "Linear event",
+            transform: { module: "./openclaw-linear-transform.js" },
+          },
+        ],
+      },
+    });
+
+    const warning = doctorWarnings.join("\n");
+    expect(warning).toContain("hooks.transformsDir:");
+    expect(warning).toContain("/virtual/.openclaw/workspace/skills/linear-webhook");
+    expect(warning).toContain("/virtual/.openclaw/hooks/transforms");
+    expect(warning).toContain("move custom transforms there or remove hooks.transformsDir");
+  });
+
   it("does not warn about sender-based group allowlist for googlechat", async () => {
     const doctorWarnings = await collectDoctorWarnings({
       channels: {
@@ -1613,6 +1637,24 @@ describe("doctor config flow", () => {
     ).toBe("existing-session");
     expect(result.cfg.plugins?.allow).toEqual(["telegram", "browser"]);
     expect(result.cfg.plugins?.entries?.browser?.enabled).toBe(true);
+  });
+
+  it("preserves commitments config on repair", async () => {
+    const result = await runDoctorConfigWithInput({
+      repair: true,
+      config: {
+        commitments: {
+          enabled: true,
+          maxPerDay: 2,
+        },
+      },
+      run: loadAndMaybeMigrateDoctorConfig,
+    });
+
+    expect(result.cfg.commitments).toEqual({
+      enabled: true,
+      maxPerDay: 2,
+    });
   });
 
   it("preserves discord streaming intent while stripping unsupported keys on repair", async () => {
@@ -2525,7 +2567,7 @@ describe("doctor config flow", () => {
       };
     };
     expect(cfg.channels.googlechat.dm.allowFrom).toEqual(["*"]);
-    expect(cfg.channels.googlechat.allowFrom).toEqual(["*"]);
+    expect(cfg.channels.googlechat.allowFrom).toBeUndefined();
   });
 
   it("does not report repeat talk provider normalization on consecutive repair runs", async () => {
